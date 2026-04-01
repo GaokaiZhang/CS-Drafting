@@ -1,6 +1,5 @@
 import json
 from datasets import load_dataset
-from fastchat.model.model_adapter import get_conversation_template
 
 mmlu_features = ['input', 'A', 'B', 'C', 'D', 'target']
 template_mmlu = 'Question: {}\n(A) {} (B) {} (C) {} (D) {}\n Answer: \n Let\'s think step by step. '
@@ -28,6 +27,10 @@ def format_initial_input(item, dataset_name):
 
 
 def format_vicuna_input(item, dataset_name):
+    try:
+        from fastchat.model.model_adapter import get_conversation_template
+    except ImportError:
+        raise ImportError("fastchat is required for vicuna formatting: pip install fschat")
     if dataset_name == 'gsm8k':
         initial_input = template_gsm8k_vicuna.format(item['question'])
     elif dataset_name == 'mmlu' or 'mmlu' in dataset_name:
@@ -56,13 +59,6 @@ def get_test_set(dataset_name):
             res = json.load(f)
         return res
     elif dataset_name == 'gsm8k':
-        # full_gsm8k_dir = '/home/your_dir/gsm8k_dataset.json'
-        # with open(full_gsm8k_dir) as f:
-        #     test = json.load(f)
-        # return test['test']
-        full_gsm8k_dir = '/home/your_dir/gsm8k_dataset.json'
-        with open(full_gsm8k_dir) as f:
-            gsm8k = json.load(f)
-        # gsm8k = load_dataset('gsm8k', 'main')
-        return gsm8k['test']
+        gsm8k = load_dataset('openai/gsm8k', 'main')
+        return list(gsm8k['test'])
 

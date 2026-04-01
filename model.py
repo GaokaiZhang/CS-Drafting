@@ -9,22 +9,52 @@ from mag import draft_sample_k_bn_gram
 TIME_COST = {
     'model_parameters': {
         "xxl": 11300,
-        "small": 60, 
-        "base": 220, 
+        "small": 60,
+        "base": 220,
         "large": 770,
         "xl": 3000,
         'JackFram/llama-68m': 68,
         'JackFram/llama-160m': 160,
-        '7b': 70000,
-        'llama': 70000,
+        'tinyllama': 1100,
+        'TinyLlama': 1100,
+        'llama-2-7b': 7000,
+        'Llama-2-7b': 7000,
+        'llama-2-13b': 13000,
+        'Llama-2-13b': 13000,
+        '7b': 7000,
+        'llama': 7000,
     },
     'previous_work': {
         "xxl": 1,
-        "small": 0.02, 
-        "base": 0.04, 
+        "small": 0.02,
+        "base": 0.04,
         "large": 0.11,
     }
 }
+
+
+def _to_legacy_cache(past_key_values):
+    """Convert DynamicCache (transformers>=4.38) to legacy tuple-of-tuples format."""
+    if past_key_values is None or isinstance(past_key_values, tuple):
+        return past_key_values
+    try:
+        from transformers.cache_utils import DynamicCache
+        if isinstance(past_key_values, DynamicCache):
+            # transformers 5.x: layers is a list of DynamicLayer with .keys/.values
+            if hasattr(past_key_values, 'layers'):
+                return tuple(
+                    (layer.keys, layer.values)
+                    for layer in past_key_values.layers
+                )
+            # transformers 4.x fallback: key_cache/value_cache lists
+            if hasattr(past_key_values, 'key_cache'):
+                return tuple(
+                    (past_key_values.key_cache[i], past_key_values.value_cache[i])
+                    for i in range(len(past_key_values.key_cache))
+                )
+    except (ImportError, AttributeError):
+        pass
+    return past_key_values
 
 
 def crop_past_key_values(past_key_values, maximum_length):
@@ -282,7 +312,7 @@ class CSDraftingDecoderModelKVCache(CSDraftingModel):
                 self.past_ids = new_past_ids
             return input_ids[:, longest_common_prefix:], self.past_key_values
     def post_forward_cache(self, out, whole_input_ids):
-        self.past_key_values = out.past_key_values
+        self.past_key_values = _to_legacy_cache(out.past_key_values)
         self.past_ids = whole_input_ids
         assert self.past_ids.shape[-1] == self.past_key_values[0][0].shape[-2]
     def review(self, initial_input, input_ids, probs, review_index, leniency=1):
@@ -402,12 +432,16 @@ class CountedCSDraftingCachedEncoderDecoderModel(CountedCSDraftingEncoderDecoder
             res_ids = target_ids[:, :matches.index(0) + 1 + review_index]
         return res_ids, None
 
-tokenizer = AutoTokenizer.from_pretrained('JackFram/llama-160m')
-
 class CountedCSDraftingCachedDecoderModel(CountedCSDraftingDecoderModel):
     def __init__(self, model, sample=False, name='', counter_version='model_parameters', cache_dir=''):
         super().__init__(model, sample, name, counter_version='model_parameters')
         self.cache = load_cache_model(cache_dir)
+        self._tokenizer = None
+
+    def _get_tokenizer(self):
+        if self._tokenizer is None:
+            self._tokenizer = AutoTokenizer.from_pretrained('JackFram/llama-160m')
+        return self._tokenizer
     def review(self, initial_input, input_ids, probs, review_index, leniency=1):
         self.forward_count += 1
         key = tokens_to_new_key(initial_input)
@@ -420,9 +454,70 @@ class CountedCSDraftingCachedDecoderModel(CountedCSDraftingDecoderModel):
         target_ids_for_review = target_ids[:, review_index:max_len]
         input_ids_for_review = input_ids[:, review_index:max_len]
         matches = (target_ids_for_review[0, :] == input_ids_for_review[0, :]).int().detach().tolist()
-        if 0 not in matches: 
+        if 0 not in matches:
             res_ids = target_ids[:, :len(matches) + 1 + review_index]
         else:
             res_ids = target_ids[:, :matches.index(0) + 1 + review_index]
         return res_ids, None
+
+
+class ACSDMiddleTierModel(CSDraftingDecoderModelKVCache):
+    """
+    M_m in the ACSD system — plays two roles:
+      1. Pre-verifier: cheaply filters M_s drafts before M_l sees them (Phase 2)
+      2. Drafter: promoted when M_s rolling acceptance rate drops below tau (Phase 3)
+    """
+    def __init__(self, model, sample=False, name='', vocab_size=32000,
+                 counter_version='model_parameters'):
+        super().__init__(model, sample, name, vocab_size=vocab_size)
+        self.forward_count = 0
+        self.wall_time = []
+        self.acceptance_history = []   # per-step acceptance ratio when pre-verifying
+        self.saved_ml_positions = 0    # cumulative draft positions filtered from M_l
+        self.counter_version = counter_version
+        time_cost_dict = TIME_COST.get(counter_version, {})
+        self.time_cost = 0
+        for abbr in time_cost_dict:
+            if abbr in name:
+                self.time_cost = time_cost_dict[abbr]
+                break
+
+    def pre_verify(self, initial_input, input_ids, probs, review_index, leniency=1):
+        """
+        Filter M_s draft tokens. Accepts only tokens M_m agrees with.
+        Tracks per-step acceptance ratio and cumulative M_l savings.
+        """
+        n_drafted = input_ids.shape[-1] - review_index
+        self.forward_count += 1
+        t0 = time.time()
+        result_ids, result_probs = self.review(
+            initial_input, input_ids, probs, review_index, leniency=leniency
+        )
+        self.wall_time.append(time.time() - t0)
+        n_accepted = result_ids.shape[-1] - review_index
+        self.saved_ml_positions += max(0, n_drafted - n_accepted)
+        ratio = n_accepted / n_drafted if n_drafted > 0 else 1.0
+        self.acceptance_history.append(ratio)
+        return result_ids, result_probs
+
+    def propose(self, initial_input, input_ids, k):
+        """Greedy autoregressive drafting (used when promoted to drafter role)."""
+        input_ids = input_ids.to(self.model.device)
+        with torch.no_grad():
+            for _ in range(k):
+                out = self.model(input_ids, use_cache=False)
+                new_token = torch.argmax(out.logits[0, -1, :]).unsqueeze(0).unsqueeze(0)
+                input_ids = torch.cat([input_ids, new_token], dim=1)
+        return input_ids
+
+    def get_rolling_alpha(self, window=20):
+        if not self.acceptance_history:
+            return 1.0
+        recent = self.acceptance_history[-window:]
+        return sum(recent) / len(recent)
+
+    def calculate_time_cost(self):
+        res = self.forward_count * self.time_cost
+        self.forward_count = 0
+        return res
 
