@@ -30,10 +30,12 @@ def _eos_token(model):
 def _make_one_hot_probs(token_ids, vocab_size, device):
     """
     Build a one-hot probability tensor from a greedy token sequence.
-    Shape: [1, seq_len, vocab_size]
+    Follows csd.py convention: probs[k] = one-hot of token k+1, so the first
+    token is dropped (it has no preceding prediction).
+    Shape: [1, seq_len - 1, vocab_size]
     """
     return torch.nn.functional.one_hot(
-        token_ids.squeeze(0), num_classes=vocab_size
+        token_ids.squeeze(0)[1:], num_classes=vocab_size
     ).float().unsqueeze(0).to(device)
 
 

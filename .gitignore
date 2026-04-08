@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# local planning/notes — not for repo
+acsd_overview.md
+run.md
+status.md
+plan.md
+
+# experiment logs and large result files
+results/*.log
+cache/

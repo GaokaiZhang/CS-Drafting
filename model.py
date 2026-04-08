@@ -33,31 +33,15 @@ TIME_COST = {
 }
 
 
-def _to_legacy_cache(past_key_values):
-    """Convert DynamicCache (transformers>=4.38) to legacy tuple-of-tuples format."""
-    if past_key_values is None or isinstance(past_key_values, tuple):
-        return past_key_values
+def crop_past_key_values(past_key_values, maximum_length):
     try:
         from transformers.cache_utils import DynamicCache
         if isinstance(past_key_values, DynamicCache):
-            # transformers 5.x: layers is a list of DynamicLayer with .keys/.values
-            if hasattr(past_key_values, 'layers'):
-                return tuple(
-                    (layer.keys, layer.values)
-                    for layer in past_key_values.layers
-                )
-            # transformers 4.x fallback: key_cache/value_cache lists
-            if hasattr(past_key_values, 'key_cache'):
-                return tuple(
-                    (past_key_values.key_cache[i], past_key_values.value_cache[i])
-                    for i in range(len(past_key_values.key_cache))
-                )
+            past_key_values.crop(maximum_length)
+            return past_key_values
     except (ImportError, AttributeError):
         pass
-    return past_key_values
-
-
-def crop_past_key_values(past_key_values, maximum_length):
+    # legacy tuple-of-tuples
     new_past = []
     for idx in range(len(past_key_values)):
         new_past.append(
@@ -66,8 +50,18 @@ def crop_past_key_values(past_key_values, maximum_length):
                 past_key_values[idx][1][:, :, :maximum_length, :],
             )
         )
-    past_key_values = tuple(new_past)
-    return past_key_values
+    return tuple(new_past)
+
+
+def _kv_seq_len(past_key_values):
+    """Return the sequence length stored in past_key_values (tuple or DynamicCache)."""
+    try:
+        from transformers.cache_utils import DynamicCache
+        if isinstance(past_key_values, DynamicCache):
+            return past_key_values.get_seq_length()
+    except (ImportError, AttributeError):
+        pass
+    return past_key_values[0][0].shape[-2]
 
 
 
@@ -312,9 +306,9 @@ class CSDraftingDecoderModelKVCache(CSDraftingModel):
                 self.past_ids = new_past_ids
             return input_ids[:, longest_common_prefix:], self.past_key_values
     def post_forward_cache(self, out, whole_input_ids):
-        self.past_key_values = _to_legacy_cache(out.past_key_values)
+        self.past_key_values = out.past_key_values
         self.past_ids = whole_input_ids
-        assert self.past_ids.shape[-1] == self.past_key_values[0][0].shape[-2]
+        assert self.past_ids.shape[-1] == _kv_seq_len(self.past_key_values)
     def review(self, initial_input, input_ids, probs, review_index, leniency=1):
         start = time.time()
         cut_input_ids, past_key_values = self.prepare_input(input_ids, review_index)
