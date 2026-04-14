@@ -361,6 +361,53 @@ class CountedCSDraftingDecoderModel(CSDraftingDecoderModel):
                 self.time_cost = time_cost_dict[model_abbr]
                 break
         self.wall_time = []
+    def propose(self, initial_input, input_ids, k):
+        self.forward_count += k
+        return super().propose(initial_input, input_ids, k)
+    def propose_with_proxy(self, initial_input, input_ids, k_max,
+                           proxy_type, threshold, mavg_window=5):
+        """
+        Draft up to k_max tokens greedily, stopping early when a local confidence
+        proxy falls below threshold.  Proxy types:
+          'entropy'  — Shannon entropy of softmax; stop if entropy > threshold
+          'top1'     — top-1 log-prob; stop if log p_max < threshold  (threshold < 0)
+          'margin'   — log p_1 - log p_2; stop if margin < threshold
+          'mavg'     — moving-avg of top-1 log-prob; stop if avg < threshold
+        Each draft step increments self.forward_count.
+        """
+        input_ids = input_ids.to(self.model.device)
+        logprob_history = []
+        with torch.no_grad():
+            for _ in range(k_max):
+                res = self.model(input_ids, use_cache=False)
+                logits = res.logits[0, -1, :]
+                log_probs = torch.log_softmax(logits, dim=-1)
+                new_token = logits.argmax().unsqueeze(0).unsqueeze(0)
+                input_ids = torch.cat([input_ids, new_token], dim=1)
+                self.forward_count += 1
+
+                if proxy_type == 'entropy':
+                    probs = log_probs.exp()
+                    score = -(probs * log_probs).sum().item()
+                    if score > threshold:
+                        break
+                elif proxy_type == 'top1':
+                    score = log_probs.max().item()
+                    if score < threshold:
+                        break
+                elif proxy_type == 'margin':
+                    top2 = torch.topk(log_probs, 2).values
+                    score = (top2[0] - top2[1]).item()
+                    if score < threshold:
+                        break
+                elif proxy_type == 'mavg':
+                    logprob_history.append(log_probs.max().item())
+                    if len(logprob_history) > mavg_window:
+                        logprob_history.pop(0)
+                    score = sum(logprob_history) / len(logprob_history)
+                    if score < threshold:
+                        break
+        return input_ids
     def review(self, initial_input, input_ids, probs, review_index, leniency=1):
         self.forward_count += 1
         start = time.time()
@@ -370,7 +417,7 @@ class CountedCSDraftingDecoderModel(CSDraftingDecoderModel):
     def calculate_time_cost(self):
         res = self.forward_count * self.time_cost
         self.forward_count = 0
-        return res  
+        return res
 
 
 

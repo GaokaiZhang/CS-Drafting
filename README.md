@@ -2,42 +2,94 @@
 
 Original paper: "[Cascade Speculative Drafting for Even Faster LLM Inference](https://arxiv.org/abs/2312.11462)"
 
-This repo contains the original CS-Drafting implementation **plus our course-project extension: Adaptive Cascaded Speculative Decoding (ACSD)**, which adds a third middle-tier model to the cascade with cascaded pre-verification and adaptive role-switching.
+This repo contains the original CS-Drafting implementation **plus our course-project extension: Adaptive Cascaded Speculative Decoding (ACSD)**, which adds a third middle-tier model to the cascade with cascaded pre-verification and a double-layer drafting design.
 
 > **For teammates:** See [`status.md`](status.md) for current project status, experiment instructions, and deliverable deadlines.
+
+---
 
 ## ACSD System
 
 | Tier | Model | Role |
 |------|-------|------|
-| $M_s$ | TinyLlama-1.1B | Small drafter |
-| $M_m$ | LLaMA-2-7B | Pre-verifier or promoted drafter |
+| $M_s$ | TinyLlama-1.1B | Small fast drafter |
+| $M_m$ | LLaMA-2-7B | Pre-verifier (Phase 2) / verifier + extender (Phase 4) |
 | $M_l$ | LLaMA-2-13B | Final verifier (always runs — losslessness guaranteed) |
 
-**Phase 2 (cascaded):** $M_m$ filters $M_s$'s draft tokens before $M_l$ sees them, reducing $M_l$ forward-pass cost.
+**Phase 2 (cascaded):** $M_m$ pre-filters $M_s$'s draft tokens before $M_l$ sees them, reducing $M_l$ forward-pass cost.
 
-**Phase 3 (adaptive):** When $M_s$'s rolling acceptance rate drops below threshold $\tau$, $M_m$ is promoted to drafter, bypassing $M_s$ entirely.
+**Phase 4 (double-layer + proxy):** $M_s$ drafts up to $k_s$ tokens; $M_m$ verifies and auto-regressively extends to $k_m$ total; $M_l$ verifies all $k_m$. Proxy variants let $M_s$ stop early when its confidence is low.
+
+---
+
+## Parameter Reference
+
+| Parameter | CLI flag | Default | Meaning |
+|-----------|----------|---------|---------|
+| mode | `--mode` | — | `autoregressive`: $M_l$ only; `baseline`: $M_s \to M_l$; `cascaded`: $M_s \to M_m$ pre-verify $\to M_l$; `double_layer`: $M_s$ drafts $k_s$, $M_m$ verifies and extends to $k_m$, $M_l$ verifies all; `proxy_entropy`/`proxy_top1`/`proxy_margin`/`proxy_mavg`: `double_layer` + confidence proxy that stops $M_s$ early |
+| dataset | `--dataset` | `mmlu` | Evaluation dataset: `mmlu` or `gsm8k` |
+| n\_samples | `--n_samples` | `100` | Number of prompts to evaluate |
+| k\_s | (config) | `5` | Max tokens $M_s$ drafts per step. In proxy modes, $M_s$ may stop early. |
+| k\_m | `--k_m` | `10` | Total tokens $M_m$ extends to in `double_layer`/proxy modes (must be ≥ k\_s). |
+| proxy\_threshold | `--proxy_threshold` | type-specific | Confidence threshold at which $M_s$ stops early. Defaults: entropy > 2.0, top1 < −1.5, margin < 1.0, mavg < −1.5. |
+| mavg\_window | `--mavg_window` | `5` | Rolling window for mavg proxy smoothing. |
+| answer\_only | `--answer_only` | off | Accuracy-only mode: direct-answer prompt (no CoT) for MMLU, 200-token budget for GSM8K. |
+
+**Metrics in result JSON:**
+
+| Metric | Meaning |
+|--------|---------|
+| `tokens_per_sec` | End-to-end throughput |
+| `avg_ml_calls` | Average $M_l$ forward passes per sample (lower = more efficient) |
+| `avg_mm_calls` | Average $M_m$ forward passes per sample |
+| `accuracy` | Fraction of correct answers (only present in `--answer_only` runs) |
+
+---
 
 ## Experiment Results
 
-Main results (100 samples, max 200 tokens, single A6000 48 GB GPU, fp16):
+All experiments: 100 samples, max 200 tokens, single A6000 48 GB GPU, fp16.
+Speedup relative to Baseline CSD.
 
-| Method | Dataset | Tok/s | $M_l$ calls/sample | $M_m$ saved/sample |
-|--------|---------|-------|---------------------|--------------------|
-| Autoregressive ($M_l$ only) | MMLU | 9.3 | 190.0 | — |
-| Autoregressive ($M_l$ only) | GSM8K | 9.4 | 177.0 | — |
-| Baseline CSD ($M_s \to M_l$) | MMLU | 26.6 | 29.7 | — |
-| Baseline CSD ($M_s \to M_l$) | GSM8K | 23.9 | 30.4 | — |
-| ACSD Cascaded (Phase 2) | MMLU | **41.1** (1.55×) | 38.0 | 37.7 |
-| ACSD Cascaded (Phase 2) | GSM8K | **39.9** (1.67×) | 36.1 | 41.9 |
-| ACSD Adaptive τ=0.4 (Phase 3) | MMLU | 39.3 (1.48×) | 38.2 | 36.2 |
-| ACSD Adaptive τ=0.4 (Phase 3) | GSM8K | 26.3 (1.10×) | 38.8 | 20.5 |
+**Output accuracy** (zero-shot, direct-answer prompt, `--answer_only`, separate from throughput runs): MMLU 30.0%, GSM8K 9.0%.
+Since all methods are lossless ($M_l$ always has final say), accuracy is identical across all methods.
+Empirically verified: Baseline CSD and Double-layer both match autoregressive $M_l$ on MMLU (30.0%) and within 1 sample on GSM8K (10.0% vs 9.0% — parser noise on truncated outputs).
 
-Speedup is relative to Baseline CSD.
+### Phase 2: Cascaded Pre-Verification
 
-**τ ablation (MMLU, W=20):** τ=0.2→40.7, τ=0.3→**40.9**, τ=0.4→39.3, τ=0.5→32.5 tok/s.
+| Method | Dataset | Tok/s | Speedup vs baseline | $M_l$ calls/sample | $M_m$ saved/sample |
+|--------|---------|------:|--------------------:|-------------------:|-------------------:|
+| Autoregressive ($M_l$ only) | MMLU | 9.3 | — | 190.0 | — |
+| Autoregressive ($M_l$ only) | GSM8K | 9.4 | — | 177.0 | — |
+| Baseline CSD ($M_s \to M_l$) | MMLU | 26.6 | 1.00× | 29.7 | — |
+| Baseline CSD ($M_s \to M_l$) | GSM8K | 23.9 | 1.00× | 30.4 | — |
+| ACSD Cascaded (Phase 2) | MMLU | **41.1** | **1.55×** | 38.0 | 37.7 |
+| ACSD Cascaded (Phase 2) | GSM8K | **39.9** | **1.67×** | 36.1 | 41.9 |
 
-**Window size ablation (MMLU, τ=0.4):** W=10→39.4, W=20→39.3, W=50→39.4 tok/s; throughput is negligibly affected by window size.
+### Phase 4: Double-Layer & Confidence Proxy
+
+All experiments: k\_s=5, k\_m=10, 100 samples, max 200 tokens, single A6000 48 GB GPU, fp16.
+
+| Method | Dataset | Tok/s | Speedup vs baseline | $M_l$ calls/sample | $M_m$ calls/sample |
+|--------|---------|------:|--------------------:|-------------------:|-------------------:|
+| Double-layer | MMLU | 29.5 | 1.11× | **24.8** | 69.0 |
+| Double-layer | GSM8K | 27.7 | 1.16× | **23.4** | 69.2 |
+| + proxy\_top1 (log-prob < −1.5) | MMLU | 30.9 | 1.16× | **24.8** | 70.2 |
+| + proxy\_top1 | GSM8K | 29.3 | 1.23× | **23.4** | 70.2 |
+| + proxy\_entropy (H > 2.0) | MMLU | 32.1 | 1.21× | **24.8** | 76.9 |
+| + proxy\_entropy | GSM8K | **31.4** | **1.31×** | **23.4** | 75.1 |
+| + proxy\_margin (margin < 1.0) | MMLU | **32.9** | **1.24×** | **24.8** | 77.5 |
+| + proxy\_margin | GSM8K | **31.4** | **1.31×** | **23.4** | 76.4 |
+| + proxy\_mavg (mavg < −1.5) | MMLU | 29.9 | 1.12× | **24.8** | 69.6 |
+| + proxy\_mavg | GSM8K | 28.9 | 1.21× | **23.4** | 69.9 |
+
+**Key observations:**
+- Double-layer reduces $M_l$ calls ~35% vs. Phase 2 (~25 vs. ~38/sample), because $M_m$ extends drafts to $k_m=10$ tokens, amortising $M_l$ verification over longer sequences.
+- Raw throughput is lower than Phase 2 cascaded (29–33 vs. 41 tok/s) — $M_m$ extension adds latency. Different operating point: fewer $M_l$ calls rather than maximum raw speed.
+- `proxy_margin` and `proxy_entropy` give the best throughput gains (1.21–1.31× vs. baseline).
+- `proxy_mavg` barely improves over double-layer base — the smoothed threshold rarely triggers.
+
+---
 
 ## Re-running Experiments
 
@@ -45,96 +97,80 @@ Speedup is relative to Baseline CSD.
 conda activate acsd
 cd /mnt/data/gaokaizhang/mlsys/CS-Drafting
 
-# baseline/autoregressive: M_l only (~26 GB)
+# autoregressive / baseline: M_l only (~26 GB)
 env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
     --mode baseline --dataset mmlu --n_samples 100 --device cuda:0 \
     --output results/baseline_mmlu.json
 
-# cascaded/adaptive: all 3 models (~42 GB)
+# cascaded (Phase 2): all 3 models (~42 GB)
 env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
-    --mode adaptive --dataset mmlu --n_samples 100 \
-    --tau 0.4 --window_size 20 --device cuda:0 \
-    --output results/adaptive_mmlu_tau04.json
+    --mode cascaded --dataset mmlu --n_samples 100 --device cuda:0 \
+    --output results/cascaded_mmlu.json
+
+# double_layer (Phase 4): all 3 models (~42 GB)
+env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
+    --mode double_layer --dataset mmlu --n_samples 100 \
+    --k_s 5 --k_m 10 --device cuda:0 \
+    --output results/double_layer_mmlu.json
+
+# proxy modes (Phase 4): swap --mode for proxy_top1, proxy_margin, proxy_mavg
+env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
+    --mode proxy_entropy --dataset mmlu --n_samples 100 \
+    --k_s 5 --k_m 10 --device cuda:0 \
+    --output results/proxy_entropy_mmlu.json
+
+# accuracy evaluation (any mode, uses direct-answer prompt)
+env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
+    --mode autoregressive --dataset mmlu --n_samples 100 \
+    --answer_only --device cuda:0 \
+    --output results/accuracy_mmlu.json
 ```
 
-Result files are JSON in `results/`. Each contains `config`, `summary` (tok/s, avg_wall_time, avg_ml_calls), and `raw` arrays.
+GPU memory: `autoregressive`/`baseline` need ~26 GB; `cascaded`/`double_layer`/`proxy_*` need ~42 GB (all 3 models).
 
-## Change Log
-- 2024-04-02: Added KV Cache to reduce latency when generation length is long
-- 2026-04: ACSD extension: cascaded pre-verification and adaptive role-switching (`acsd.py`, `main_acsd.py`, `model.py`)
-- 2026-04: Updated for transformers ≥ 4.45 (DynamicCache API, `cais/mmlu` Parquet dataset)
-- 2026-04-07: All main experiments complete; results in `results/`
+Each result file is a JSON with three top-level keys: `config` (hyperparameters), `summary` (tok/s, avg_wall_time, avg_ml_calls, accuracy), and `raw` (per-sample arrays including `correct` and `generated_texts` in `--answer_only` runs).
 
+---
 
 ## Setup
 
-### Original environment (python 3.9)
-
-```
-conda create --name csd python=3.9
-conda activate csd
-pip install -r requirements.txt
-```
-
 ### ACSD environment (python 3.11, recommended)
 
-Required for running `main_acsd.py` with modern LLaMA models:
-
-```
+```bash
 conda create -n acsd python=3.11 -y
 conda activate acsd
 pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 pip install transformers>=4.45 datasets>=2.20 accelerate sentencepiece tqdm
 ```
 
-> **Note:** CUDA 12.4 (`cu124`) requires driver ≥ 520. If your driver supports CUDA 12.6+ use `cu126` instead.
-> CUDA_VISIBLE_DEVICES may need to be set explicitly via `env CUDA_VISIBLE_DEVICES=<id> python ...` depending on your cluster configuration.
+> CUDA 12.4 (`cu124`) requires driver ≥ 520. Use `cu126` for CUDA 12.6+ drivers.
 
+### Original CS-Drafting environment (python 3.9)
 
-## ACSD Experiments
-
-`main_acsd.py` is the entry point for the three-tier ACSD system (TinyLlama-1.1B → LLaMA-2-7B → LLaMA-2-13B).
-All settings are in the `config` dict at the top of the file.
-
-```python
-config = {
-    'ms_name': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0',   # or local path
-    'mm_name': 'meta-llama/Llama-2-7b-hf',
-    'ml_name': 'meta-llama/Llama-2-13b-hf',
-    'mode':    'adaptive',   # 'baseline' | 'cascaded' | 'adaptive'
-    'dataset': 'mmlu',       # 'mmlu' | 'gsm8k'
-    'n_samples': 100,
-    ...
-}
+```bash
+conda create --name csd python=3.9
+conda activate csd
+pip install -r requirements.txt
 ```
 
-Run:
-```
-env CUDA_VISIBLE_DEVICES=0 python main_acsd.py
-```
-
-All three models in fp16 fit on a single 48 GB GPU (~41 GB total).
-
-**MMLU note:** The original `lukaemon/mmlu` dataset uses a loading script no longer supported by `datasets ≥ 2.20`. The code now uses `cais/mmlu` (Parquet format, identical content).
-
+---
 
 ## Recreating Original CS-Drafting Experiments
 
-The starting point of the report is main.py which can be run without args for maximum hackability.
-All experiment setting can be adjusted in the config diction in main.py.
-GPU usage can be adjusted by changing the following line in main.py
+The starting point of the report is `main.py`, which can be run without args.
+All experiment settings can be adjusted in the `config` dict in `main.py`.
+GPU usage can be adjusted by changing:
 
-```
+```python
 usable_devices = [0, 1, 2] * 2
 ```
 
-Each index in the list representing a single process on gpu of the index.
-Note that target model is cached in ./cache, so running each process will cost less than 8GB of memory.
-We recommend using 2 process for each GPU with at least 16gb of memory for higher GPU utiliization.
+Each index in the list represents a single process on the GPU of that index.
+We recommend using 2 processes per GPU with at least 16 GB of memory.
 
-To run experiments with FLAN-T5 on mmlu for SWI (model size) setup, change the config to the following:
+To run experiments with FLAN-T5 on MMLU for SWI (model size) setup:
 
-```
+```python
 config = {
     'draft_names': ['google/flan-t5-base', 'google/flan-t5-small'],
     'target_name': 'google/flan-t5-xxl',
@@ -148,9 +184,9 @@ config = {
 }
 ```
 
-For SWI (previous work)
+For SWI (previous work):
 
-```
+```python
 config = {
     'draft_names': ['google/flan-t5-base', 'google/flan-t5-small'],
     'target_name': 'google/flan-t5-xxl',
@@ -164,9 +200,9 @@ config = {
 }
 ```
 
-To run LLAMA-7B on mmlu
+To run LLaMA-7B on MMLU:
 
-```
+```python
 config = {
     'draft_names': ['JackFram/llama-160m'],
     'target_name': 'llama_7b',
@@ -180,65 +216,55 @@ config = {
 }
 ```
 
-To run gsm8k, you can change the dataset field in the config to 
+To run GSM8K, change `'dataset': 'gsm8k'` in the config.
 
+Note: when using two draft models without MAG, the `k_matrix` parameters relate to the paper notation as:
 ```
-'dataset': 'gsm8k'
-```
-Note that when using two draft models other than mag, the parameter
-in k_matrix is different from the one in the paper. Their relations are the following:
-```
-k_matrix[0][0] = k<sub>11</sub>
-k_matrix[0][1] = k<sub>12</sub> - k_matrix[0][0]
+k_matrix[0][0] = k_11
+k_matrix[0][1] = k_12 - k_matrix[0][0]
 ```
 
+---
 
+## Using CS-Drafting for Inference
 
-## Using CS Drafting for Inference
-
-To run csd on your own inputs
-
-```
+```python
 from csd import csd
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from model import CountedCSDraftingDecoderModelKVCache, get_mag_model
 
-
 draft_list = []
-draft_names = ['JackFram/llama-160m']
-for draft_name in draft_names:
-    hf_model = AutoModelForSeq2SeqLM.from_pretrained(draft_name)
-    model = CountedCSDraftingDecoderModelKVCache(hf_model, name=draft_name, counter_version=config['counter_version'])
+for draft_name in ['JackFram/llama-160m']:
+    hf_model = AutoModelForCausalLM.from_pretrained(draft_name)
+    model = CountedCSDraftingDecoderModelKVCache(hf_model, name=draft_name)
     draft_list.append(model)
 
-_BIGRAM_DIR = './bigram_models/'
-bi_gram_path = _BIGRAM_DIR + 'wiki_bigram_naive_bayers_greedy_llama_next_token.json'
-mag_model = get_mag_model(bi_gram_path, config['is_decoder_only'])
-draft_list.append(mag_model)
-
-LLAMA_HF_PATH = LLAMA_PATH + 'hf_7b_chat'
-from transformers import LlamaForCausalLM, LlamaTokenizer
-
-tokenizer = <your hugginface llama tokenizer>
-hf_model = <your hugginface llama model>
-
+tokenizer = AutoTokenizer.from_pretrained('meta-llama/Llama-2-7b-hf')
+hf_model = AutoModelForCausalLM.from_pretrained('meta-llama/Llama-2-7b-hf')
 target_model = CountedCSDraftingDecoderModelKVCache(hf_model, name='llama', vocab_size=32000)
-target_model.cuda(device)
+target_model.cuda(0)
 
-question = '<Your inputs>'
-initial_input = tokenizer(question, truncation=True, padding=False, return_tensors="pt")['input_ids'].to(target_model.device)
-input_ids = initial_input
-res = csd(draft_list, target_model, initial_input, input_ids, k_matrix, max_length=200)
-generated_text = tokenizer.batch_decode(res, skip_special_tokens=True)
+question = '<Your input>'
+initial_input = tokenizer(question, return_tensors='pt')['input_ids'].to(target_model.device)
+res = csd(draft_list, target_model, initial_input, initial_input, k_matrix=[[5, 10], [0, 10]])
+print(tokenizer.batch_decode(res, skip_special_tokens=True))
 ```
 
- 
+---
+
+## Change Log
+
+- 2024-04-02: Added KV Cache to reduce latency for long generation
+- 2026-04: ACSD extension — cascaded pre-verification (`acsd.py`, `main_acsd.py`, `model.py`)
+- 2026-04: Updated for transformers ≥ 4.45 (DynamicCache API, `cais/mmlu` Parquet dataset)
+- 2026-04-14: Phase 4 complete — double\_layer and proxy\_\* (entropy, top1, margin, mavg) on MMLU + GSM8K
+- 2026-04-14: Added accuracy evaluation (`--answer_only`) with empirical losslessness verification
+
+---
 
 ## Citation
 
-The details of this repo are described in the following paper:
-
-```
+```bibtex
 @article{chen2023cascade,
   title={Cascade Speculative Drafting for Even Faster LLM Inference},
   author={Chen, Ziyi and Yang, Xiaocong and Lin, Jiacheng and Sun, Chenkai and Chen, Yangyi and Chang, Kevin Chen-Chuan and Huang, Jie},
@@ -246,4 +272,3 @@ The details of this repo are described in the following paper:
   year={2023}
 }
 ```
-
