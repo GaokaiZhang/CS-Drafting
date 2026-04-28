@@ -31,7 +31,7 @@ jobs:
       - name: Upload static UI
         uses: actions/upload-pages-artifact@v3
         with:
-          path: CS-Drafting/ui
+          path: ui
 
       - name: Deploy to GitHub Pages
         id: deployment
