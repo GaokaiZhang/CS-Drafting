@@ -526,9 +526,51 @@ class CountedCSDraftingDecoderModel(CSDraftingDecoderModel):
     def propose(self, initial_input, input_ids, k):
         self.propose_count += 1
         start = time.time()
+        self.forward_count += k
         res = super().propose(initial_input, input_ids, k)
         self.propose_wall_time.append(time.time() - start)
         return res
+    def propose_with_proxy(self, initial_input, input_ids, k_max,
+                           proxy_type, threshold, mavg_window=5):
+        self.propose_count += 1
+        start = time.time()
+        input_ids = _move_token_ids(input_ids, self.model.device)
+        logprob_history = []
+        with torch.no_grad():
+            for _ in range(k_max):
+                _validate_input_ids(self, input_ids)
+                res = self.model(input_ids, use_cache=False)
+                logits = _generation_logits(self, res.logits)[0, -1, :]
+                log_probs = torch.log_softmax(logits, dim=-1)
+                new_token = logits.argmax().unsqueeze(0).unsqueeze(0)
+                input_ids = torch.cat([input_ids, new_token], dim=1)
+                self.forward_count += 1
+
+                if proxy_type == 'entropy':
+                    probs = log_probs.exp()
+                    score = -(probs * log_probs).sum().item()
+                    if score > threshold:
+                        break
+                elif proxy_type == 'top1':
+                    score = log_probs.max().item()
+                    if score < threshold:
+                        break
+                elif proxy_type == 'margin':
+                    top2 = torch.topk(log_probs, 2).values
+                    score = (top2[0] - top2[1]).item()
+                    if score < threshold:
+                        break
+                elif proxy_type == 'mavg':
+                    logprob_history.append(log_probs.max().item())
+                    if len(logprob_history) > mavg_window:
+                        logprob_history.pop(0)
+                    score = sum(logprob_history) / len(logprob_history)
+                    if score < threshold:
+                        break
+                else:
+                    raise ValueError(f"Unsupported proxy_type: {proxy_type}")
+        self.propose_wall_time.append(time.time() - start)
+        return input_ids
     def review(self, initial_input, input_ids, probs, review_index, leniency=1):
         self.forward_count += 1
         self.review_count += 1
@@ -539,7 +581,7 @@ class CountedCSDraftingDecoderModel(CSDraftingDecoderModel):
     def calculate_time_cost(self):
         res = self.forward_count * self.time_cost
         self.forward_count = 0
-        return res  
+        return res
 
 
 

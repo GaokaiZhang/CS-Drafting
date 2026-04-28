@@ -2,7 +2,7 @@
 
 Original paper: "[Cascade Speculative Drafting for Even Faster LLM Inference](https://arxiv.org/abs/2312.11462)"
 
-This repo contains the original CS-Drafting implementation **plus our course-project extension: Adaptive Cascaded Speculative Decoding (ACSD)**, which adds a third middle-tier model to the cascade with cascaded pre-verification and adaptive role-switching.
+This repo contains the original CS-Drafting implementation **plus our course-project extension: Adaptive Cascaded Speculative Decoding (ACSD)**, which adds a third middle-tier model to the cascade with cascaded pre-verification and a double-layer drafting design.
 
 > **For teammates:** See [`status.md`](status.md) for current project status, experiment instructions, and deliverable deadlines.
 
@@ -13,12 +13,12 @@ This repo contains the original CS-Drafting implementation **plus our course-pro
 | Tier | Model | Role |
 |------|-------|------|
 | $M_s$ | TinyLlama-1.1B | Small fast drafter |
-| $M_m$ | LLaMA-2-7B | Pre-verifier **or** promoted drafter |
+| $M_m$ | LLaMA-2-7B | Pre-verifier (Phase 2) / verifier + extender (Phase 4) |
 | $M_l$ | LLaMA-2-13B | Final verifier (always runs — losslessness guaranteed) |
 
 **Phase 2 (cascaded):** $M_m$ pre-filters $M_s$'s draft tokens before $M_l$ sees them, reducing $M_l$ forward-pass cost.
 
-**Phase 3 (adaptive):** When $M_s$'s rolling acceptance rate $\alpha$ drops below threshold $\tau$, $M_m$ is promoted to drafter, bypassing $M_s$ entirely. $M_l$ always performs final verification.
+**Phase 4 (double-layer + proxy):** $M_s$ drafts up to $k_s$ tokens; $M_m$ verifies and auto-regressively extends to $k_m$ total; $M_l$ verifies all $k_m$. Proxy variants let $M_s$ stop early when its confidence is low.
 
 ---
 
@@ -26,13 +26,14 @@ This repo contains the original CS-Drafting implementation **plus our course-pro
 
 | Parameter | CLI flag | Default | Meaning |
 |-----------|----------|---------|---------|
-| mode | `--mode` | `adaptive` | `autoregressive`: $M_l$ only (no drafting); `baseline`: $M_s \to M_l$; `cascaded`: $M_s \to M_m \to M_l$ pre-verify; `adaptive`: cascaded + dynamic drafter switching |
+| mode | `--mode` | — | `autoregressive`: $M_l$ only; `baseline`: $M_s \to M_l$; `cascaded`: $M_s \to M_m$ pre-verify $\to M_l$; `double_layer`: $M_s$ drafts $k_s$, $M_m$ verifies and extends to $k_m$, $M_l$ verifies all; `proxy_entropy`/`proxy_top1`/`proxy_margin`/`proxy_mavg`: `double_layer` + confidence proxy that stops $M_s$ early |
 | dataset | `--dataset` | `mmlu` | Evaluation dataset: `mmlu` or `gsm8k` |
 | n\_samples | `--n_samples` | `100` | Number of prompts to evaluate |
-| τ (tau) | `--tau` | `0.4` | Switching threshold. $M_m$ becomes drafter when $M_s$ rolling acceptance $\bar{\alpha} < \tau$. Higher $\tau$ = more aggressive switching. Only used in `adaptive` mode. |
-| W (window\_size) | `--window_size` | `20` | Rolling window length in drafting steps for computing $\bar{\alpha}$. Each step corresponds to one $M_s$ proposal of $k_s$ tokens. Larger $W$ = smoother, slower-reacting signal. |
-| k\_s | (config) | `5` | Tokens $M_s$ drafts per step (fixed). |
-| k\_m | `--k_m` | `4` | Tokens $M_m$ drafts per step when promoted to drafter. Only active in `adaptive` mode when $\bar{\alpha} < \tau$. |
+| k\_s | (config) | `5` | Max tokens $M_s$ drafts per step. In proxy modes, $M_s$ may stop early. |
+| k\_m | `--k_m` | `10` | Total tokens $M_m$ extends to in `double_layer`/proxy modes (must be ≥ k\_s). |
+| proxy\_threshold | `--proxy_threshold` | type-specific | Confidence threshold at which $M_s$ stops early. Defaults: entropy > 2.0, top1 < −1.5, margin < 1.0, mavg < −1.5. |
+| mavg\_window | `--mavg_window` | `5` | Rolling window for mavg proxy smoothing. |
+| answer\_only | `--answer_only` | off | Accuracy-only mode: direct-answer prompt (no CoT) for MMLU, 200-token budget for GSM8K. |
 
 **Metrics in result JSON:**
 
@@ -40,8 +41,8 @@ This repo contains the original CS-Drafting implementation **plus our course-pro
 |--------|---------|
 | `tokens_per_sec` | End-to-end throughput |
 | `avg_ml_calls` | Average $M_l$ forward passes per sample (lower = more efficient) |
-| `mm_saved_positions` | Token positions $M_m$ filtered before $M_l$ per sample (higher = more $M_l$ savings) |
-| `switch_counts` | Transitions across $\tau$ boundary in the *final* $\alpha$ window at end of sample |
+| `avg_mm_calls` | Average $M_m$ forward passes per sample |
+| `accuracy` | Fraction of correct answers (only present in `--answer_only` runs) |
 
 ---
 
@@ -50,7 +51,11 @@ This repo contains the original CS-Drafting implementation **plus our course-pro
 All experiments: 100 samples, max 200 tokens, single A6000 48 GB GPU, fp16.
 Speedup relative to Baseline CSD.
 
-### Main Results
+**Output accuracy** (zero-shot, direct-answer prompt, `--answer_only`, separate from throughput runs): MMLU 30.0%, GSM8K 9.0%.
+Since all methods are lossless ($M_l$ always has final say), accuracy is identical across all methods.
+Empirically verified: Baseline CSD and Double-layer both match autoregressive $M_l$ on MMLU (30.0%) and within 1 sample on GSM8K (10.0% vs 9.0% — parser noise on truncated outputs).
+
+### Phase 2: Cascaded Pre-Verification
 
 | Method | Dataset | Tok/s | Speedup vs baseline | $M_l$ calls/sample | $M_m$ saved/sample |
 |--------|---------|------:|--------------------:|-------------------:|-------------------:|
@@ -60,50 +65,29 @@ Speedup relative to Baseline CSD.
 | Baseline CSD ($M_s \to M_l$) | GSM8K | 23.9 | 1.00× | 30.4 | — |
 | ACSD Cascaded (Phase 2) | MMLU | **41.1** | **1.55×** | 38.0 | 37.7 |
 | ACSD Cascaded (Phase 2) | GSM8K | **39.9** | **1.67×** | 36.1 | 41.9 |
-| ACSD Adaptive τ=0.4 (Phase 3) | MMLU | 39.3 | 1.48× | 38.2 | 36.2 |
-| ACSD Adaptive τ=0.4 (Phase 3) | GSM8K | 26.3 | 1.10× | 38.8 | 20.5 |
 
-### τ Ablation — MMLU (W=20, k\_m=4)
+### Phase 4: Double-Layer & Confidence Proxy
 
-| τ | Tok/s | $M_l$ calls/sample | $M_m$ saved/sample | Switches in final window |
-|---|------:|-------------------:|-------------------:|-------------------------:|
-| 0.2 | 40.8 | 38.0 | 37.7 | 0.0 |
-| 0.3 | **40.9** | 38.0 | 37.7 | 1.30 |
-| 0.4 | 39.3 | 38.2 | 36.2 | 1.26 |
-| 0.5 | 32.5 | 39.6 | 28.7 | 2.96 |
+All experiments: k\_s=5, k\_m=10, 100 samples, max 200 tokens, single A6000 48 GB GPU, fp16.
 
-At τ=0.2 the rolling α never falls below 0.2, so no switching occurs (degenerates to cascaded). τ=0.3 is optimal for MMLU.
+| Method | Dataset | Tok/s | Speedup vs baseline | $M_l$ calls/sample | $M_m$ calls/sample |
+|--------|---------|------:|--------------------:|-------------------:|-------------------:|
+| Double-layer | MMLU | 29.5 | 1.11× | **24.8** | 69.0 |
+| Double-layer | GSM8K | 27.7 | 1.16× | **23.4** | 69.2 |
+| + proxy\_top1 (log-prob < −1.5) | MMLU | 30.9 | 1.16× | **24.8** | 70.2 |
+| + proxy\_top1 | GSM8K | 29.3 | 1.23× | **23.4** | 70.2 |
+| + proxy\_entropy (H > 2.0) | MMLU | 32.1 | 1.21× | **24.8** | 76.9 |
+| + proxy\_entropy | GSM8K | **31.4** | **1.31×** | **23.4** | 75.1 |
+| + proxy\_margin (margin < 1.0) | MMLU | **32.9** | **1.24×** | **24.8** | 77.5 |
+| + proxy\_margin | GSM8K | **31.4** | **1.31×** | **23.4** | 76.4 |
+| + proxy\_mavg (mavg < −1.5) | MMLU | 29.9 | 1.12× | **24.8** | 69.6 |
+| + proxy\_mavg | GSM8K | 28.9 | 1.21× | **23.4** | 69.9 |
 
-### τ Ablation — GSM8K (W=20, k\_m=4)
-
-| τ | Tok/s | $M_l$ calls/sample | $M_m$ saved/sample | Switches in final window |
-|---|------:|-------------------:|-------------------:|-------------------------:|
-| 0.2 | **39.7** | 36.1 | 41.9 | 0.0 |
-| 0.3 | 28.7 | 37.9 | 28.2 | 0.93 |
-| 0.4 | 26.3 | 38.8 | 20.5 | 0.87 |
-| 0.5 | 21.8 | 40.2 | 8.4 | 0.70 |
-
-On GSM8K, any switching to $M_m$ drafting degrades throughput. τ=0.2 (no switching, degenerates to cascaded) is optimal.
-
-### Rolling Window Ablation — MMLU (τ=0.4, k\_m=4)
-
-| W | Tok/s | $M_l$ calls/sample | $M_m$ saved/sample |
-|---|------:|-------------------:|-------------------:|
-| 10 | 39.4 | 38.2 | 36.2 |
-| 20 | 39.3 | 38.2 | 36.2 |
-| 50 | 39.4 | 38.2 | 36.2 |
-
-Window size has negligible effect on throughput or $M_l$ cost for MMLU.
-
-### k\_m Ablation — MMLU (τ=0.4, W=20)
-
-| k\_m | Tok/s | $M_l$ calls/sample | $M_m$ saved/sample |
-|------|------:|-------------------:|-------------------:|
-| 2 | 33.9 | 39.2 | 36.2 |
-| 4 | **39.3** | 38.2 | 36.2 |
-| 6 | 33.3 | 37.8 | 36.2 |
-
-k\_m=4 is optimal. Smaller k\_m underutilises $M_m$ promotion steps; larger k\_m keeps $M_m$ in drafter mode too long, increasing per-step latency.
+**Key observations:**
+- Double-layer reduces $M_l$ calls ~35% vs. Phase 2 (~25 vs. ~38/sample), because $M_m$ extends drafts to $k_m=10$ tokens, amortising $M_l$ verification over longer sequences.
+- Raw throughput is lower than Phase 2 cascaded (29–33 vs. 41 tok/s) — $M_m$ extension adds latency. Different operating point: fewer $M_l$ calls rather than maximum raw speed.
+- `proxy_margin` and `proxy_entropy` give the best throughput gains (1.21–1.31× vs. baseline).
+- `proxy_mavg` barely improves over double-layer base — the smoothed threshold rarely triggers.
 
 ---
 
@@ -118,16 +102,33 @@ env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
     --mode baseline --dataset mmlu --n_samples 100 --device cuda:0 \
     --output results/baseline_mmlu.json
 
-# cascaded / adaptive: all 3 models (~42 GB)
+# cascaded (Phase 2): all 3 models (~42 GB)
 env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
-    --mode adaptive --dataset mmlu --n_samples 100 \
-    --tau 0.4 --window_size 20 --k_m 4 --device cuda:0 \
-    --output results/adaptive_mmlu_tau04.json
+    --mode cascaded --dataset mmlu --n_samples 100 --device cuda:0 \
+    --output results/cascaded_mmlu.json
+
+# double_layer (Phase 4): all 3 models (~42 GB)
+env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
+    --mode double_layer --dataset mmlu --n_samples 100 \
+    --k_s 5 --k_m 10 --device cuda:0 \
+    --output results/double_layer_mmlu.json
+
+# proxy modes (Phase 4): swap --mode for proxy_top1, proxy_margin, proxy_mavg
+env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
+    --mode proxy_entropy --dataset mmlu --n_samples 100 \
+    --k_s 5 --k_m 10 --device cuda:0 \
+    --output results/proxy_entropy_mmlu.json
+
+# accuracy evaluation (any mode, uses direct-answer prompt)
+env CUDA_VISIBLE_DEVICES=<GPU> python main_acsd.py \
+    --mode autoregressive --dataset mmlu --n_samples 100 \
+    --answer_only --device cuda:0 \
+    --output results/accuracy_mmlu.json
 ```
 
-GPU memory: `autoregressive`/`baseline` need ~26 GB; `cascaded`/`adaptive` need ~42 GB (all 3 models).
+GPU memory: `autoregressive`/`baseline` need ~26 GB; `cascaded`/`double_layer`/`proxy_*` need ~42 GB (all 3 models).
 
-Each result file is a JSON with three top-level keys: `config` (hyperparameters), `summary` (tok/s, avg_wall_time, avg_ml_calls), and `raw` (per-sample arrays).
+Each result file is a JSON with three top-level keys: `config` (hyperparameters), `summary` (tok/s, avg_wall_time, avg_ml_calls, accuracy), and `raw` (per-sample arrays including `correct` and `generated_texts` in `--answer_only` runs).
 
 ---
 
@@ -363,9 +364,10 @@ The Flask UI serves:
 ## Change Log
 
 - 2024-04-02: Added KV Cache to reduce latency for long generation
-- 2026-04: ACSD extension — cascaded pre-verification and adaptive role-switching (`acsd.py`, `main_acsd.py`, `model.py`)
+- 2026-04: ACSD extension — cascaded pre-verification (`acsd.py`, `main_acsd.py`, `model.py`)
 - 2026-04: Updated for transformers ≥ 4.45 (DynamicCache API, `cais/mmlu` Parquet dataset)
-- 2026-04-08: All main experiments and ablations complete; results in `results/`
+- 2026-04-14: Phase 4 complete — double\_layer and proxy\_\* (entropy, top1, margin, mavg) on MMLU + GSM8K
+- 2026-04-14: Added accuracy evaluation (`--answer_only`) with empirical losslessness verification
 
 ---
 

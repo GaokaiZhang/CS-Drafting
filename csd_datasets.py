@@ -8,6 +8,11 @@ concatenate_datasets = None
 
 template_mmlu = 'Question: {}\n(A) {} (B) {} (C) {} (D) {}\n Answer: \n Let\'s think step by step. '
 template_gsm8k = 'Reason the math question below step by step. Question: {}.\n Answer: '
+
+# Direct-answer variants used for accuracy measurement only (no CoT).
+# MMLU: model is forced to emit a letter immediately after the open paren.
+# GSM8K: same CoT prompt but we give more tokens to reach the final answer.
+template_mmlu_direct = 'Question: {}\n(A) {} (B) {} (C) {} (D) {}\nThe answer is ('
 # cais/mmlu uses 'all' as the config name to load all subjects at once
 MMLU_CONFIG = 'all'
 MMLU_SUBJECTS = [
@@ -84,6 +89,16 @@ def format_initial_input(item, dataset_name):
         q, ch = item['question'], item['choices']
         initial_input = template_mmlu.format(q, ch[0], ch[1], ch[2], ch[3])
     return initial_input
+
+
+def format_accuracy_input(item, dataset_name):
+    """Direct-answer prompt for accuracy-only evaluation (no chain-of-thought)."""
+    if dataset_name == 'gsm8k':
+        # Same CoT prompt — accuracy run just uses more tokens to let the model finish.
+        return template_gsm8k.format(item['question'])
+    elif dataset_name == 'mmlu' or 'mmlu' in dataset_name:
+        q, ch = item['question'], item['choices']
+        return template_mmlu_direct.format(q, ch[0], ch[1], ch[2], ch[3])
 
 
 def format_vicuna_input(item, dataset_name):
