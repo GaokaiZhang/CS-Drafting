@@ -251,6 +251,115 @@ print(tokenizer.batch_decode(res, skip_special_tokens=True))
 
 ---
 
+## Testing and CI
+
+Local test stack:
+
+```bash
+pip install --index-url https://download.pytorch.org/whl/cpu torch
+pip install -r requirements.txt -r requirements-dev.txt
+pytest -q
+```
+
+Test layers now included:
+
+- unit tests for scoring and fixed-window decoding behavior
+- integration tests for comparison artifact generation and serialization
+- functional smoke tests for the CLI and static UI contract
+
+CI/CD:
+
+- `.github/workflows/ci.yml` runs the full test suite on GitHub Actions using CPU PyTorch
+- `.github/workflows/deploy-ui.yml` publishes the static inspector in `ui/` to GitHub Pages on pushes to `main` or `master`
+
+The fixed-window comparison runner is:
+
+```bash
+python main_fixed_window.py \
+  --mode compare \
+  --dataset mmlu \
+  --ms_name Qwen/Qwen2.5-1.5B-Instruct \
+  --mm_name Qwen/Qwen2.5-7B-Instruct \
+  --ml_name Qwen/Qwen2.5-14B-Instruct \
+  --small_device cuda:0 \
+  --middle_device cuda:1 \
+  --large_device cuda:2 \
+  --small_window 3 \
+  --middle_window 9 \
+  --n_samples 100 \
+  --trace_samples 5 \
+  --output results/fixed_window_compare_mmlu.json
+```
+
+Open `ui/index.html` and load the generated JSON to inspect per-token traces, usage breakdowns, pass-through rates, and benchmark scores.
+
+### Babel HPC setup
+
+Create the repo-specific environment:
+
+```bash
+conda create -n mlsys-fw python=3.11 -y
+conda activate mlsys-fw
+pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.6.0
+pip install -r requirements.txt -r requirements-dev.txt
+```
+
+Load the shared Hugging Face cache on Babel compute nodes:
+
+```bash
+source scripts/babel_hf_env.sh
+```
+
+That script sets:
+
+- `HF_HOME=/data/user_data/$USER/.hf_cache`
+- `HF_HUB_CACHE=/data/hf_cache/hub`
+- `HF_DATASETS_CACHE=/data/hf_cache/datasets`
+- `HF_HUB_OFFLINE=1`
+
+The fixed-window hierarchy now defaults to a same-family Qwen stack:
+
+- small: `Qwen/Qwen2.5-1.5B-Instruct`
+- middle: `Qwen/Qwen2.5-7B-Instruct`
+- large: `Qwen/Qwen2.5-14B-Instruct`
+
+On Babel we run them split across two GPUs:
+
+- `small_device=cuda:0`
+- `middle_device=cuda:0`
+- `large_device=cuda:1`
+
+The checked-in Babel Slurm script targets `debug` with `2 x L40S`, which fits within the current `debug_qos` per-user GPU cap while keeping the large verifier isolated on its own GPU.
+
+Submit both benchmark jobs:
+
+```bash
+./scripts/submit_fixed_window_all.sh
+```
+
+Or submit one dataset explicitly:
+
+```bash
+sbatch scripts/run_fixed_window_babel.sbatch mmlu
+sbatch scripts/run_fixed_window_babel.sbatch gsm8k
+```
+
+### Flask result viewer
+
+Once result JSON files are in `results/`, run:
+
+```bash
+PORT=5000 conda run -n mlsys-fw python flask_ui.py
+```
+
+The Flask UI serves:
+
+- `/` for the dashboard
+- `/api/results` for available result artifacts
+- `/api/results/<filename>` for a specific experiment payload
+
+---
+
 ## Change Log
 
 - 2024-04-02: Added KV Cache to reduce latency for long generation

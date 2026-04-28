@@ -2,13 +2,24 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+.pytest_cache/
 
 # local planning/notes — not for repo
 acsd_overview.md
+acsd_ablation_plan.md
+acsd_effectiveness_investigation.md
 run.md
 status.md
 plan.md
+docs/speculative_decoding_report.md
+docs/speculative_decoding_poster.md
+docs/figures/
 
 # experiment logs and large result files
+results/*.json
 results/*.log
+results/shards/
+results/tuning_*/
+logs/
+slurm-*.out
 cache/

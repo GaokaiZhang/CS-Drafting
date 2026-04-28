@@ -1,0 +1,197 @@
+\documentclass[landscape]{article}
+
+\usepackage[paperwidth=48in,paperheight=36in,margin=1.0in]{geometry}
+\usepackage{multicol}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\pagestyle{empty}
+
+\definecolor{accent}{RGB}{20,94,130}
+\definecolor{soft}{RGB}{235,244,248}
+\definecolor{ink}{RGB}{25,30,35}
+
+\newcommand{\blocktitle}[1]{\vspace{0.25in}\noindent{\color{accent}\Huge\bfseries #1}\par\vspace{0.12in}}
+\newcommand{\posterbox}[1]{%
+  \vspace{0.12in}
+  \noindent\colorbox{soft}{%
+    \begin{minipage}{0.96\linewidth}
+    \vspace{0.15in}
+    #1
+    \vspace{0.15in}
+    \end{minipage}}
+  \vspace{0.12in}
+}
+
+\begin{document}
+\color{ink}
+
+\begin{center}
+{\fontsize{58}{64}\selectfont\bfseries When Does a Middle Verifier Help?}\\[0.15in]
+{\fontsize{34}{40}\selectfont Three-Tier Speculative Decoding as a Quality Filter}\\[0.12in]
+{\LARGE MLSys Course Project}
+\end{center}
+
+\vspace{0.25in}
+
+\posterbox{
+{\Huge\bfseries Main takeaway.}
+{\Huge A middle verifier is helpful when it improves answer quality. On GSM8K, our three-layer Qwen stack consistently improves exact-match accuracy over the tuned two-layer speculative baseline.}
+}
+
+\begin{multicols}{3}
+
+\blocktitle{Question}
+
+Speculative decoding uses a small model to draft tokens and a large model to verify them. We ask whether inserting a middle verifier helps:
+
+\vspace{0.1in}
+\begin{center}
+{\LARGE Small drafter $\rightarrow$ Middle verifier $\rightarrow$ Large verifier}
+\end{center}
+
+Our tested stack:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Tier & Model & Role \\
+\midrule
+Small & Qwen2.5-0.5B & draft \\
+Middle & Qwen2.5-1.5B & filter/route \\
+Large & Qwen2.5-14B & final verify \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\blocktitle{Method}
+
+The fixed-window hierarchy lets the middle model filter small-model drafts before final verification:
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.65in, every node/.style={draw, rounded corners, align=center, minimum width=1.35in, minimum height=0.55in, font=\Large}]
+\node (p) {Prompt\\prefix};
+\node[right of=p] (s) {Small\\drafts};
+\node[right of=s] (m) {Middle\\filters};
+\node[right of=m] (l) {Large\\verifies};
+\draw[->, line width=1.3pt] (p) -- (s);
+\draw[->, line width=1.3pt] (s) -- (m);
+\draw[->, line width=1.3pt] (m) -- (l);
+\draw[->, line width=1.3pt] (l.south) .. controls +(0,-0.7) and +(0,-0.7) .. (p.south);
+\end{tikzpicture}
+\end{center}
+
+Variants:
+
+\begin{itemize}
+\item \texttt{baseline\_sw5}: tuned two-layer baseline.
+\item \texttt{fixed\_cascade}: always use the middle verifier.
+\item \texttt{adaptive}: adjust windows using recent utility.
+\item \texttt{selective}: route through the middle only when useful.
+\item \texttt{cost-aware selective}: final in-progress run that bypasses the middle when measured utility is negative.
+\end{itemize}
+
+\blocktitle{GSM8K Paired Result}
+
+On the same 1319 GSM8K samples, the three-layer hierarchy improves exact match by 8.64 percentage points and slightly improves throughput.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Method & Tok/s & Score \\
+\midrule
+Two-layer baseline & 29.677 & 0.3010 \\
+Three-layer hierarchy & 30.052 & 0.3874 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\posterbox{
+{\LARGE This is the strongest evidence that the middle verifier is helpful: it changes the candidate trajectory and improves reasoning accuracy.}
+}
+
+\blocktitle{Tuned Baseline Ablation}
+
+Against the stronger tuned baseline, all completed three-layer methods still improve GSM8K exact match.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Method & Tok/s & Score \\
+\midrule
+\texttt{baseline\_sw5} & 34.387 & 0.3541 \\
+\texttt{fixed\_cascade} & 31.935 & 0.3827 \\
+\texttt{adaptive} & 32.816 & 0.3654 \\
+\texttt{selective} & 33.265 & 0.3706 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The selective method is the best completed speed-quality compromise: it keeps most baseline throughput and improves exact match by 1.65 percentage points.
+
+\blocktitle{Why It Helps}
+
+GSM8K requires multi-step reasoning. A small model can make early draft mistakes that push generation onto a worse trajectory. The middle verifier is useful because it can reject or redirect those weak continuations before final large-model verification.
+
+\posterbox{
+{\LARGE Design lesson: use the middle model as a selective quality filter, not as an always-on extra verifier.}
+}
+
+\blocktitle{What We Tried}
+
+\begin{center}
+\begin{tabular}{p{0.31\linewidth}p{0.55\linewidth}}
+\toprule
+Step & Contribution \\
+\midrule
+Reproduced baseline & Established benchmark and scoring path. \\
+ACSD middle verification & Showed that middle filtering changes candidate quality. \\
+Fixed-window hierarchy & Became the main helpfulness evaluation path. \\
+Tuned baseline & Made the comparison stronger. \\
+Adaptive routing & Tested dynamic window control. \\
+Selective routing & Best completed GSM8K tradeoff. \\
+Cost-aware routing & Final in-progress method to reduce overhead. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\blocktitle{Final Values To Fill}
+
+Cost-aware selective routing is implemented and running. Fill this table after final shard merges:
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+Dataset & Method & Tok/s & Score \\
+\midrule
+GSM8K & \texttt{baseline\_sw5} &  &  \\
+GSM8K & \texttt{selective} &  &  \\
+GSM8K & \texttt{cost-aware} &  &  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Current shard status as of April 28:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Run & Complete & Merged? \\
+\midrule
+GSM8K cost-aware & 15/16 & no \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\blocktitle{Conclusion}
+
+{\LARGE Three-tier speculative decoding is helpful when evaluated as a quality-improving filter. On GSM8K, the middle verifier consistently improves exact-match accuracy. Selective and cost-aware routing are the practical path to keeping that quality gain while controlling overhead.}
+
+\vfill
+{\large References: Leviathan et al., \emph{Fast Inference from Transformers via Speculative Decoding}; Chen et al., \emph{Speculative Sampling}; Cascade Speculative Drafting.}
+
+\end{multicols}
+\end{document}

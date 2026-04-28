@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Speculative Decoding Inspector</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>Speculative Decoding Inspector</h1>
+          <p class="subtitle">ACSD traces, adaptive switching metrics, and naive speculative decoding comparison.</p>
+        </div>
+        <div class="controls">
+          <label class="file-picker">
+            <span>Load Result JSON</span>
+            <input id="file-input" type="file" accept="application/json">
+          </label>
+          <button id="load-demo" class="secondary-button">Load Demo Data</button>
+        </div>
+      </header>
+
+      <section class="hero-band">
+        <img
+          alt="Colored token blocks representing small, middle, and large model stages"
+          src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+        >
+        <div class="hero-copy">
+          <div id="status-pill" class="status-pill">No file loaded</div>
+          <p id="config-summary" class="config-summary">Open a comparison artifact from <code>main_acsd_compare.py</code> or inspect the built-in demo.</p>
+        </div>
+      </section>
+
+      <nav class="tabs" aria-label="Inspector sections">
+        <button class="tab-button active" data-tab="overview">Overview</button>
+        <button class="tab-button" data-tab="baseline">Baseline</button>
+        <button class="tab-button" data-tab="cascaded">Cascaded</button>
+        <button class="tab-button" data-tab="adaptive">Adaptive</button>
+      </nav>
+
+      <main class="content-grid">
+        <section id="overview" class="tab-panel active"></section>
+        <section id="baseline" class="tab-panel"></section>
+        <section id="hierarchical" class="tab-panel"></section>
+        <section id="cascaded" class="tab-panel"></section>
+        <section id="adaptive" class="tab-panel"></section>
+      </main>
+    </div>
+
+    <script src="./demo_data.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
