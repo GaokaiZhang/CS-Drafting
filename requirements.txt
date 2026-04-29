@@ -1,4 +1,8 @@
-fschat[model_worker,webui]
-torch==2.0.1
-datasets==2.4.0
-transformers==4.34.1
+torch==2.6.0
+transformers>=4.45,<5
+datasets>=2.20,<4
+accelerate>=0.26,<2
+fsspec<=2025.3.0,>=2023.1.0
+sentencepiece
+tqdm
+flask>=3.0,<4
