@@ -130,6 +130,7 @@ def parse_args():
     parser.add_argument("--max_length", type=int, default=200)
     parser.add_argument("--trace_samples", type=int, default=0)
     parser.add_argument("--disable_stop_on_answer", action="store_true")
+    parser.add_argument("--skip_missing_baseline_comparisons", action="store_true")
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -271,6 +272,8 @@ def main():
             continue
         baseline_label = spec["baseline_label"] or _default_baseline_label(spec)
         if baseline_label not in result["runs"]:
+            if args.skip_missing_baseline_comparisons:
+                continue
             raise ValueError(
                 f"Baseline label '{baseline_label}' for '{spec['label']}' was not run"
             )

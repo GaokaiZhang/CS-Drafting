@@ -20,6 +20,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--inputs", nargs="+", required=True)
+    parser.add_argument("--skip_missing_baseline_comparisons", action="store_true")
     return parser.parse_args()
 
 
@@ -202,7 +203,7 @@ def _validate_complete_runs(payload, expected_labels, path):
                 )
 
 
-def merge_results(input_paths):
+def merge_results(input_paths, skip_missing_baseline_comparisons=False):
     input_paths = _normalize_inputs(input_paths)
     if not input_paths:
         raise ValueError("No input shard files were provided.")
@@ -327,6 +328,8 @@ def merge_results(input_paths):
             label = spec["label"]
             baseline_label = spec.get("baseline_label") or _default_baseline_label(spec)
             if label not in merged["runs"] or baseline_label not in merged["runs"]:
+                if skip_missing_baseline_comparisons:
+                    continue
                 raise ValueError(
                     f"Missing merged runs for comparison: {label} vs {baseline_label}"
                 )
@@ -353,5 +356,8 @@ def save_result(result, output_path):
 
 if __name__ == "__main__":
     args = parse_args()
-    merged = merge_results(args.inputs)
+    merged = merge_results(
+        args.inputs,
+        skip_missing_baseline_comparisons=args.skip_missing_baseline_comparisons,
+    )
     save_result(merged, args.output)
