@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -120,8 +121,18 @@ def _canonicalize_model_ref(value):
     return value
 
 
+def _normalize_json_value(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _normalize_json_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_normalize_json_value(child) for child in value]
+    return value
+
+
 def _normalize_config(config):
-    normalized = deepcopy(config)
+    normalized = _normalize_json_value(deepcopy(config))
     for key in ("ms_name", "mm_name", "ml_name"):
         if key in normalized:
             normalized[key] = _canonicalize_model_ref(normalized[key])
@@ -130,6 +141,13 @@ def _normalize_config(config):
 
 def _normalize_run_config(config):
     normalized = _normalize_config(config)
+    for optional_key in (
+        "dynamic_small_window_min",
+        "dynamic_small_window_max",
+        "selective_route_middle_acceptance_low",
+        "selective_route_probe_interval",
+    ):
+        normalized.setdefault(optional_key, None)
     normalized["num_shards"] = 1
     normalized["shard_index"] = 0
     normalized.pop("output", None)
