@@ -27,7 +27,7 @@
 \maketitle
 
 \begin{abstract}
-Speculative decoding accelerates large language model inference by using a small model to draft candidate tokens and a large model to verify them. This project studies whether adding a middle model makes that pipeline more useful in practice. We began from the CS-Drafting codebase, reproduced its two-model and cascaded baselines, added an ACSD-style middle-verification prototype, then built a final fixed-window Qwen benchmark around a 0.5B $\rightarrow$ 1.5B $\rightarrow$ 14B stack. The final system includes fixed-window large-model verification, adaptive draft windows, selective routing, cost-aware selective routing, Slurm sharding, repair jobs, strict shard validation, and report-ready scoring. Our central conclusion is that the middle model is helpful as a quality-improving filter on reasoning-heavy generation, but it is not a free throughput improvement. On GSM8K, three-layer methods consistently improve exact-match accuracy over the tuned two-layer baseline, with the best completed selective method improving score from 0.3541 to 0.3706. A paired full GSM8K run improves score from 0.3010 to 0.3874 while preserving throughput. The mixed result is that the middle tier adds real latency and is task-dependent, so selective routing is necessary. The remaining final cost-aware values are still running and are left blank in this report for later completion.
+Speculative decoding accelerates large language model inference by using a small model to draft candidate tokens and a large model to verify them. This project studies whether adding a middle model makes that pipeline more useful in practice. We began from the CS-Drafting codebase, reproduced its two-model and cascaded baselines, added an ACSD-style middle-verification prototype, then built a final fixed-window Qwen benchmark around a 0.5B $\rightarrow$ 1.5B $\rightarrow$ 14B stack. The final system includes fixed-window large-model verification, adaptive draft windows, selective routing, cost-aware selective routing, Slurm sharding, repair jobs, strict shard validation, and report-ready scoring. Our central conclusion is that the middle model is helpful as a quality-improving filter on reasoning-heavy generation, but it is not a free throughput improvement. On GSM8K, three-layer methods improve exact-match accuracy over the tuned two-layer baseline, with the final full-dataset selective method improving score from 0.3541 to 0.3753. A paired full GSM8K run improves score from 0.3010 to 0.3874 while preserving throughput. The final cost-aware route mostly bypasses the middle verifier and matches baseline accuracy, which reinforces the main systems lesson: the middle tier is useful only when routing decisions preserve its quality benefit.
 \end{abstract}
 
 \section{Project Objective}
@@ -228,49 +228,53 @@ The focused ablation compares three-layer methods against the stronger tuned \te
 \toprule
 Method & Samples & Tokens/sec & Score & $\Delta$ tokens/sec & $\Delta$ score \\
 \midrule
-\texttt{baseline\_sw5} & 1319 & 34.387 & 0.3541 & 0.000 & 0.0000 \\
-\texttt{fixed\_cascade\_sw4\_mw6} & 1155 & 31.935 & 0.3827 & -2.452 & +0.0286 \\
-\texttt{adaptive\_sw4\_mw6} & 1155 & 32.816 & 0.3654 & -1.572 & +0.0113 \\
-\texttt{selective\_sw4\_mw6} & 1155 & 33.265 & 0.3706 & -1.122 & +0.0165 \\
+\texttt{baseline\_sw5} & 1319 & 33.716 & 0.3541 & 0.000 & 0.0000 \\
+\texttt{fixed\_cascade\_sw4\_mw6} & 1319 & 30.993 & 0.3874 & -2.723 & +0.0334 \\
+\texttt{adaptive\_sw4\_mw6} & 1319 & 31.881 & 0.3723 & -1.834 & +0.0182 \\
+\texttt{selective\_sw4\_mw6} & 1319 & 32.347 & 0.3753 & -1.369 & +0.0212 \\
+\texttt{cost\_aware\_selective\_sw4\_mw6} & 1319 & 31.331 & 0.3541 & -2.385 & 0.0000 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-All three-layer variants improve GSM8K exact match. The selective variant gives the best completed speed-quality compromise: it recovers most of the baseline throughput while retaining a 1.65 percentage point score improvement.
+The fixed cascade gives the largest quality improvement, while the selective variant gives the best completed speed-quality compromise among methods that improve score. The cost-aware route mostly bypasses the middle verifier and therefore matches baseline accuracy rather than preserving the selective-route gain.
 
-\subsection{Pending Cost-Aware Results}
+\subsection{Cost-Aware Routing Result}
 
-The final cost-aware GSM8K run is intended to answer whether we can keep the GSM8K quality gain while reducing unnecessary middle-model work. Values should be filled only after all shards merge and pass validation.
+The final cost-aware GSM8K run answers whether explicit cost checks can keep the GSM8K quality gain while reducing unnecessary middle-model work. It reduces middle-route usage aggressively, but in this configuration it also removes the quality benefit.
 
 \begin{center}
-\begin{tabular}{llrrrr}
+\begin{tabular}{llrrrrr}
 \toprule
-Dataset & Method & Samples & Tokens/sec & Score & Score gain \\
+Dataset & Method & Samples & Tokens/sec & Score & Middle route & Score gain \\
 \midrule
-GSM8K & \texttt{baseline\_sw5} &  &  &  & reference \\
-GSM8K & \texttt{selective\_sw4\_mw6} &  &  &  &  \\
-GSM8K & \texttt{cost\_aware\_selective\_sw4\_mw6} &  &  &  &  \\
+GSM8K & \texttt{baseline\_sw5} & 1319 & 33.716 & 0.3541 & -- & reference \\
+GSM8K & \texttt{selective\_sw4\_mw6} & 1319 & 32.347 & 0.3753 & 93.6\% & +0.0212 \\
+GSM8K & \texttt{cost\_aware\_selective\_sw4\_mw6} & 1319 & 31.331 & 0.3541 & 3.3\% & 0.0000 \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+The result is useful but not positive for the cost-aware policy as configured. It shows that routing can remove middle-model work, but an overly conservative cost gate can also remove the accuracy gain that motivates the middle tier.
 
 \section{Status of Final Runs}
 
-As of April 28, 2026, the final GSM8K cost-aware run is sharded and still being repaired or merged. These numbers should be updated before final submission if the merge completes.
+As of April 28, 2026, the final GSM8K cost-aware run has completed and passed shard validation. MMLU repair work is still running and is not used as the main evidence for the final helpfulness claim.
 
 \begin{center}
 \begin{tabular}{p{0.28\linewidth}p{0.12\linewidth}p{0.17\linewidth}p{0.28\linewidth}}
 \toprule
 Run & Dataset & Complete shards & Submission use \\
 \midrule
-Cost-aware focused run & GSM8K & 15 / 16 & Fill final cost-aware GSM8K values after merge. \\
+Cost-aware focused run & GSM8K & 16 / 16 & Report final GSM8K speed-quality values. \\
+Cost-aware focused run & MMLU & 9 / 16 & Excluded from the main conclusion until repair and merge complete. \\
 \bottomrule
 \end{tabular}
 \end{center}
 
 \section{Analysis of Mixed Results}
 
-The final results should be read as a quality-improvement result rather than a universal speedup result. The middle tier can improve generated answers, but it also adds latency, memory pressure, and cross-device coordination. This section explains why some results look weaker than the main GSM8K helpfulness claim.
+The final results should be read as a quality-improvement result rather than a universal speedup result. The middle tier can improve generated answers, but it also adds latency, memory pressure, and cross-device coordination. This section explains why some results look weaker than the main GSM8K helpfulness claim, including the final cost-aware result.
 
 \subsection{Cost of Middle-Model Verification}
 
@@ -294,7 +298,7 @@ For that reason, this report keeps GSM8K as the main result and treats MMLU as a
 
 The fixed-window method exposes two important hyperparameters: the small draft window and the middle verification window. Larger windows can improve amortization if drafts are good, but they can also amplify low-quality continuations. Smaller windows are safer but may call the verifier too frequently. The tuned two-layer baseline uses \texttt{small\_window=5}; the completed three-layer variants use \texttt{small\_window=4} and \texttt{middle\_window=6}. These settings were chosen because they gave a better speed-quality balance than naive cascaded settings, but they are still not guaranteed to be globally optimal.
 
-Selective routing adds another sensitivity. It needs enough warmup evidence to estimate whether the middle route is useful, but too much exploration wastes time. The cost-aware variant directly addresses this by bypassing the middle route when recent middle utility is negative, when middle-to-large acceptance is too low, or when direct small-to-large acceptance is already high.
+Selective routing adds another sensitivity. It needs enough warmup evidence to estimate whether the middle route is useful, but too much exploration wastes time. The cost-aware variant directly addresses this by bypassing the middle route when recent middle utility is negative, when middle-to-large acceptance is too low, or when direct small-to-large acceptance is already high. In the completed GSM8K run, this gate was too conservative: it used the middle route for only 3.3\% of routing decisions and matched baseline accuracy.
 
 \subsection{Cluster Execution and Result Reliability}
 
@@ -357,7 +361,7 @@ Ambiguous final artifacts & Store per-sample metrics, aggregate counters, routin
 
 \section{Discussion}
 
-The evidence supports the conclusion that our method is helpful when the objective includes answer quality. The middle model can reject or redirect weak small-model continuations, and this improves GSM8K exact match across all completed focused three-layer variants. The final cost-aware method is the natural next step: it keeps the middle verifier available when it helps and bypasses it when recent measurements suggest it is not worth the cost.
+The evidence supports the conclusion that our method is helpful when the objective includes answer quality. The middle model can reject or redirect weak small-model continuations, and this improves GSM8K exact match for the fixed, adaptive, and selective three-layer variants. The final cost-aware method is a useful negative result: it demonstrates that middle-model calls can be reduced, but also that reducing them too aggressively can remove the accuracy gain.
 
 The most important lesson is that three-tier speculative decoding should be evaluated as a policy problem. The question is not only whether a middle model is smaller than the final model. The question is when the middle model should be called, how much draft context it should verify, and whether its recent utility justifies the added cost. The completed results suggest that always-on middle verification is too blunt, while selective routing better matches the actual benefit of the middle tier.
 
@@ -366,8 +370,7 @@ This report does not claim that three-tier speculative decoding is a universal t
 \section{Limitations}
 
 \begin{itemize}
-  \item The focused GSM8K table has a sample-count mismatch: \texttt{baseline\_sw5} has 1319 samples, while the completed three-layer rows have 1155 samples.
-  \item Cost-aware selective routing values are still pending until the final shard merges complete.
+  \item The cost-aware route in the final GSM8K run did not preserve the selective-route accuracy gain.
   \item The report centers GSM8K because it is the clearest completed positive result; MMLU does not yet provide equally strong evidence for the helpfulness claim.
   \item The evaluation uses one model stack: Qwen2.5-0.5B, Qwen2.5-1.5B, and Qwen2.5-14B.
   \item The fixed-window and routing hyperparameters were tuned pragmatically under cluster constraints, not exhaustively searched.
@@ -382,17 +385,17 @@ For the final poster, the result should be summarized as follows:
 \begin{itemize}
   \item \textbf{Problem:} two-layer speculative decoding can be fast, but a very small draft model may produce weak reasoning continuations.
   \item \textbf{Idea:} add a middle verifier that filters small-model drafts before final large-model verification.
-  \item \textbf{Finding:} on GSM8K, the middle verifier improves exact-match accuracy across completed three-layer variants.
-  \item \textbf{Caveat:} the middle model adds real overhead, so it should be used selectively rather than always.
+  \item \textbf{Finding:} on GSM8K, fixed, adaptive, and selective middle verification improve exact-match accuracy over the tuned baseline.
+  \item \textbf{Caveat:} the middle model adds real overhead, and the final cost-aware gate was too conservative to preserve the quality gain.
   \item \textbf{System contribution:} the final code supports fixed-window three-tier decoding, adaptive windows, selective routing, cost-aware routing, sharded Slurm execution, and strict merge validation.
 \end{itemize}
 
 \section{Conclusion}
 
-Three-tier speculative decoding is helpful as a quality-improving filter for reasoning-heavy generation. On GSM8K, the middle verifier improves exact-match accuracy in every completed focused variant, and the paired full run improves both score and throughput over its baseline. The strongest final claim is:
+Three-tier speculative decoding is helpful as a quality-improving filter for reasoning-heavy generation. On GSM8K, fixed, adaptive, and selective middle verification improve exact-match accuracy over the tuned baseline, and the paired full run improves both score and throughput over its baseline. The strongest final claim is:
 
 \begin{quote}
-Middle-layer verification can improve output quality, and selective or cost-aware routing is the right way to make that benefit practical.
+Middle-layer verification can improve output quality, and selective routing is the clearest completed way to make that benefit practical. Cost-aware routing remains promising, but it must be calibrated so it does not bypass the middle verifier too often.
 \end{quote}
 
 \begin{thebibliography}{9}
