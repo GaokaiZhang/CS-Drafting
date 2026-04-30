@@ -151,20 +151,24 @@ def _normalize_run_config(config):
         normalized.setdefault(optional_key, None)
     normalized["num_shards"] = 1
     normalized["shard_index"] = 0
+    for device_key in ("device", "small_device", "middle_device", "large_device"):
+        normalized.pop(device_key, None)
+    normalized.pop("trace_samples", None)
     normalized.pop("output", None)
     for key in [key for key in normalized if key.startswith("_")]:
         normalized.pop(key, None)
     return normalized
 
 
-def _expected_run_labels(payload):
+def _expected_run_labels(payload, include_baseline_labels=True):
     specs = payload.get("specs")
     if specs is not None:
         labels = [spec["label"] for spec in specs]
-        for spec in specs:
-            baseline_label = spec.get("baseline_label")
-            if baseline_label and baseline_label not in labels:
-                labels.append(baseline_label)
+        if include_baseline_labels:
+            for spec in specs:
+                baseline_label = spec.get("baseline_label")
+                if baseline_label and baseline_label not in labels:
+                    labels.append(baseline_label)
         if not labels:
             raise ValueError("Focused shard specs did not include any run labels.")
         return labels
@@ -236,7 +240,10 @@ def merge_results(input_paths, skip_missing_baseline_comparisons=False):
         if payload.get("specs") != normalized_loaded[0].get("specs"):
             raise ValueError("Shard focused specs do not match.")
 
-    expected_run_labels = _expected_run_labels(normalized_loaded[0])
+    expected_run_labels = _expected_run_labels(
+        normalized_loaded[0],
+        include_baseline_labels=not skip_missing_baseline_comparisons,
+    )
     for path, payload in zip(input_paths, normalized_loaded):
         _validate_complete_runs(payload, expected_run_labels, path)
 
