@@ -20,14 +20,14 @@
 \renewcommand{\arraystretch}{1.15}
 
 \title{Middle-Model Verification for Three-Tier Speculative Decoding\\A Systems Evaluation on Reasoning-Oriented Generation}
-\author{MLSys Course Project}
+\author{Zichu Wu, Gaokai Zhang, and Melody Yin\\MLSys Course Project}
 \date{April 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Speculative decoding accelerates large language model inference by using a small model to draft candidate tokens and a large model to verify them. This project studies whether adding a middle model makes that pipeline more useful in practice. We began from the CS-Drafting codebase, reproduced its two-model and cascaded baselines, added an ACSD-style middle-verification prototype, then built a final fixed-window Qwen benchmark around a 0.5B $\rightarrow$ 1.5B $\rightarrow$ 14B stack. The final system includes fixed-window large-model verification, adaptive draft windows, selective routing, cost-aware selective routing, Slurm sharding, Modal shard repair, strict shard validation, and report-ready scoring. Our central conclusion is that the middle model is helpful as a quality-improving filter on reasoning-heavy generation, but it is not a free throughput improvement. On GSM8K, three-layer methods improve exact-match accuracy over the tuned two-layer baseline, with the final full-dataset selective method improving score from 0.3541 to 0.3753. A paired full GSM8K run improves score from 0.3010 to 0.3874 while preserving throughput. On MMLU, the completed final run shows negligible accuracy change; cost-aware routing reduces middle-route usage to 7.5\% and recovers much of the lost throughput, but it still does not produce a meaningful accuracy gain. The main systems lesson is that the middle tier is useful only when routing decisions preserve a task-level quality benefit.
+Speculative decoding accelerates large language model inference by using a small model to draft candidate tokens and a large model to verify them. This project studies whether adding a middle model makes that pipeline more useful in practice. We began from the CS-Drafting codebase, reproduced its two-model and cascaded baselines, added an ACSD-style middle-verification prototype, then built a final fixed-window Qwen benchmark around a 0.5B $\rightarrow$ 1.5B $\rightarrow$ 14B stack. The final system includes fixed-window large-model verification, adaptive draft windows, selective routing, cost-aware selective routing, Slurm sharding, Modal shard repair, strict shard validation, and report-ready scoring. Our central conclusion is that the middle model is helpful as a quality-improving filter on reasoning-heavy generation, but it is not a free throughput improvement. On GSM8K, three-layer methods improve exact-match accuracy over the tuned two-layer baseline, with the final full-dataset selective method improving score from 0.3541 to 0.3753. A paired full GSM8K run improves score from 0.3010 to 0.3874 while preserving throughput. On MMLU, the completed final run shows negligible accuracy change; cost-aware routing reduces middle-route usage to 7.5\% and recovers much of the lost throughput, but it still does not produce a meaningful accuracy gain. The MMLU accuracy result is full-dataset, while its throughput should be read with a hardware caveat because one repaired shard ran on Modal rather than the original two-L40S cluster setup. The main systems lesson is that the middle tier is useful only when routing decisions preserve a task-level quality benefit.
 \end{abstract}
 
 \section{Project Objective}
@@ -41,6 +41,10 @@ Can an intermediate model make speculative decoding more useful by filtering or 
 This question matters because the fastest draft model is also the least reliable. A very small model may draft tokens that are cheap to produce but harmful to the generation trajectory. In reasoning-heavy tasks, such as GSM8K, an early weak token can steer the answer toward an incorrect chain of reasoning even if the large model is later used as a verifier. The middle model adds overhead, so it is only useful if it improves the quality-speed tradeoff enough to justify that extra work.
 
 The project therefore evolved from a pure speed experiment into a systems study of when middle-layer verification is worth using. The final benchmark does not try to prove that three-tier decoding is universally faster. It evaluates whether the middle tier can improve answer quality, and whether routing policies can preserve that benefit while reducing unnecessary middle-model calls.
+
+\section{Project Team}
+
+This project was completed by Zichu Wu, Gaokai Zhang, and Melody Yin for the MLSys course project. The work combined algorithmic changes, benchmark design, large-model systems debugging, sharded cluster execution, Modal repair execution, result validation, and report/poster preparation.
 
 \section{Research Questions}
 
@@ -197,6 +201,8 @@ The final tables use the summary metrics, but the lower-level counters were esse
 
 Full fixed-window runs are expensive because the large model is Qwen2.5-14B and each shard uses two L40S GPUs. We therefore run each final comparison as a Slurm array and merge the shards afterward. The repair scripts check each shard before merging. A shard is considered complete only when every expected run block is present and contains \texttt{summary}, \texttt{config}, \texttt{sample\_metrics}, \texttt{aggregate\_counters}, and \texttt{merge\_stats}. This validation was added after partial checkpoint JSON files were found to be mergeable even though they were missing completed method rows.
 
+The final MMLU cost-aware run required one additional repair step after the remaining cluster shard could not obtain resources. We split the incomplete original shard into eight 128-way Modal subshards, ran those subshards on Modal A100-80GB workers, merged the subshards, spliced the repaired result back into the original 16-shard set, and reran the final merge. This completed the full-dataset accuracy result. For throughput, however, the final MMLU aggregate is not a perfectly homogeneous hardware measurement because the repaired shard ran on a different hardware placement from the two-L40S Slurm shards.
+
 \section{Experimental Results}
 
 \subsection{Paired GSM8K Full-Dataset Comparison}
@@ -278,6 +284,12 @@ Method & Samples & Tokens/sec & Accuracy & Middle route & $\Delta$ tokens/sec & 
 
 This result supports the task-dependence of the method. The middle verifier is most useful when there is enough generation depth for early draft quality to affect the final answer. On MMLU, the answer format is short and constrained, so the middle verifier adds overhead without materially improving accuracy. The cost-aware route demonstrates that the overhead can be reduced, but it also confirms that there is little quality benefit to preserve on this task.
 
+\subsection{MMLU Throughput Caveat}
+
+The MMLU table above is the final validated artifact, but its throughput combines fifteen Slurm shards with one Modal-repaired shard. The Modal shard used a single A100-80GB worker with all three models on \texttt{cuda:0}, while the original Slurm shards used two L40S GPUs with the 14B model separated from the small and middle models. This made the repaired shard slower than the typical Slurm shard. For example, the repaired shard measured 17.503 tokens/sec for \texttt{baseline\_sw5} and 16.711 tokens/sec for \texttt{cost\_aware\_selective\_sw4\_mw6}, while many Slurm shards measured roughly 24--26 tokens/sec for those rows.
+
+As a sensitivity check, excluding only the Modal-repaired shard gives the following MMLU throughputs: \texttt{baseline\_sw5} 25.598 tokens/sec, \texttt{selective\_sw4\_mw6} 20.878 tokens/sec, and \texttt{cost\_aware\_selective\_sw4\_mw6} 24.226 tokens/sec. The qualitative conclusion is unchanged: cost-aware routing recovers most of the MMLU throughput loss by bypassing the middle verifier, but MMLU accuracy does not materially improve.
+
 \section{Status of Final Runs}
 
 As of April 29, 2026, the final GSM8K and MMLU cost-aware runs have completed and passed shard validation. The final MMLU repair was completed by splitting the missing shard into eight Modal subshards, merging those subshards, splicing the repaired shard back into the 16-shard set, and rerunning the final merge.
@@ -355,10 +367,10 @@ Fixed-window hierarchy & Accumulated middle-verified tokens into a block before 
 Tuned baseline & Tuned \texttt{baseline\_sw5}. & Made the comparison stronger and showed that accuracy gains persist even against a better two-layer baseline. \\
 Adaptive windows & Changed small or middle windows based on recent acceptance or utility. & Showed that routing/window policy matters; the middle model should not be treated as a static component. \\
 Selective routing & Used recent utility to decide whether to call the middle model. & Produced the best completed GSM8K speed-quality tradeoff. \\
-Cost-aware routing & Added explicit cost and acceptance checks before using the middle route. & Final in-progress method designed to preserve helpful quality gains while reducing overhead. \\
+Cost-aware routing & Added explicit cost and acceptance checks before using the middle route. & Reduced middle-route usage, but did not preserve the GSM8K quality gain and did not improve MMLU accuracy. \\
 Sharded repair and validation & Added merge drivers and strict completeness checks for Slurm shards. & Prevented partial shard files from contaminating final tables, making the reported positive results more trustworthy. \\
 MMLU repair runs & Ran and repaired MMLU shards while validating that partial files were not counted as complete. & Produced the completed boundary result showing negligible MMLU accuracy change and substantial throughput loss. \\
-Cluster scheduling recovery & Moved pending jobs across available partitions and used L40S GPUs for feasible two-GPU shards. & Made the final benchmark executable on shared hardware and exposed why throughput should be interpreted with cluster variance in mind. \\
+Cluster scheduling recovery & Moved queued jobs across available partitions and used L40S GPUs for feasible two-GPU shards. & Made the final benchmark executable on shared hardware and exposed why throughput should be interpreted with cluster variance in mind. \\
 Modal shard repair & Split the final incomplete MMLU shard into eight smaller Modal subshards and merged them back into the original shard. & Completed the final MMLU cost-aware result when cluster resources were unavailable. \\
 \bottomrule
 \end{longtable}
@@ -398,10 +410,11 @@ This report does not claim that three-tier speculative decoding is a universal t
   \item The cost-aware route in the final GSM8K run did not preserve the selective-route accuracy gain.
   \item The completed MMLU runs show negligible accuracy gain, so the helpfulness claim should be limited to reasoning-heavy generation.
   \item The MMLU cost-aware run recovers throughput by bypassing the middle route most of the time, but it does not produce a quality improvement.
+  \item The final MMLU throughput aggregate includes one Modal-repaired shard, so it should be treated as a validated end-to-end run rather than a perfectly homogeneous two-L40S throughput measurement.
   \item The evaluation uses one model stack: Qwen2.5-0.5B, Qwen2.5-1.5B, and Qwen2.5-14B.
   \item The fixed-window and routing hyperparameters were tuned pragmatically under cluster constraints, not exhaustively searched.
   \item The current results do not include statistical confidence intervals or repeated full-run trials.
-  \item Throughput is measured on shared cluster hardware, so shard-to-shard runtime variance remains.
+  \item Throughput is measured on shared cluster and Modal hardware, so shard-to-shard runtime variance remains.
 \end{itemize}
 
 \section{Summary for Presentation}
@@ -412,9 +425,9 @@ For the final poster, the result should be summarized as follows:
   \item \textbf{Problem:} two-layer speculative decoding can be fast, but a very small draft model may produce weak reasoning continuations.
   \item \textbf{Idea:} add a middle verifier that filters small-model drafts before final large-model verification.
   \item \textbf{Finding:} on GSM8K, fixed, adaptive, and selective middle verification improve exact-match accuracy over the tuned baseline.
-  \item \textbf{Boundary result:} on MMLU, accuracy is effectively unchanged while throughput drops, showing that the benefit is task-dependent.
+  \item \textbf{Boundary result:} on MMLU, accuracy is effectively unchanged; cost-aware routing recovers much of the throughput by bypassing the middle route, but the result is not a quality improvement.
   \item \textbf{Caveat:} the middle model adds real overhead, and the final GSM8K cost-aware gate was too conservative to preserve the quality gain.
-  \item \textbf{System contribution:} the final code supports fixed-window three-tier decoding, adaptive windows, selective routing, cost-aware routing, sharded Slurm execution, and strict merge validation.
+  \item \textbf{System contribution:} the final code supports fixed-window three-tier decoding, adaptive windows, selective routing, cost-aware routing, sharded Slurm execution, Modal shard repair, and strict merge validation.
 \end{itemize}
 
 \section{Conclusion}
