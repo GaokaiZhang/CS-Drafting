@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -19,6 +20,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--inputs", nargs="+", required=True)
+    parser.add_argument("--skip_missing_baseline_comparisons", action="store_true")
     return parser.parse_args()
 
 
@@ -120,8 +122,18 @@ def _canonicalize_model_ref(value):
     return value
 
 
+def _normalize_json_value(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _normalize_json_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_normalize_json_value(child) for child in value]
+    return value
+
+
 def _normalize_config(config):
-    normalized = deepcopy(config)
+    normalized = _normalize_json_value(deepcopy(config))
     for key in ("ms_name", "mm_name", "ml_name"):
         if key in normalized:
             normalized[key] = _canonicalize_model_ref(normalized[key])
@@ -130,22 +142,33 @@ def _normalize_config(config):
 
 def _normalize_run_config(config):
     normalized = _normalize_config(config)
+    for optional_key in (
+        "dynamic_small_window_min",
+        "dynamic_small_window_max",
+        "selective_route_middle_acceptance_low",
+        "selective_route_probe_interval",
+    ):
+        normalized.setdefault(optional_key, None)
     normalized["num_shards"] = 1
     normalized["shard_index"] = 0
+    for device_key in ("device", "small_device", "middle_device", "large_device"):
+        normalized.pop(device_key, None)
+    normalized.pop("trace_samples", None)
     normalized.pop("output", None)
     for key in [key for key in normalized if key.startswith("_")]:
         normalized.pop(key, None)
     return normalized
 
 
-def _expected_run_labels(payload):
+def _expected_run_labels(payload, include_baseline_labels=True):
     specs = payload.get("specs")
     if specs is not None:
         labels = [spec["label"] for spec in specs]
-        for spec in specs:
-            baseline_label = spec.get("baseline_label")
-            if baseline_label and baseline_label not in labels:
-                labels.append(baseline_label)
+        if include_baseline_labels:
+            for spec in specs:
+                baseline_label = spec.get("baseline_label")
+                if baseline_label and baseline_label not in labels:
+                    labels.append(baseline_label)
         if not labels:
             raise ValueError("Focused shard specs did not include any run labels.")
         return labels
@@ -184,7 +207,7 @@ def _validate_complete_runs(payload, expected_labels, path):
                 )
 
 
-def merge_results(input_paths):
+def merge_results(input_paths, skip_missing_baseline_comparisons=False):
     input_paths = _normalize_inputs(input_paths)
     if not input_paths:
         raise ValueError("No input shard files were provided.")
@@ -217,7 +240,10 @@ def merge_results(input_paths):
         if payload.get("specs") != normalized_loaded[0].get("specs"):
             raise ValueError("Shard focused specs do not match.")
 
-    expected_run_labels = _expected_run_labels(normalized_loaded[0])
+    expected_run_labels = _expected_run_labels(
+        normalized_loaded[0],
+        include_baseline_labels=not skip_missing_baseline_comparisons,
+    )
     for path, payload in zip(input_paths, normalized_loaded):
         _validate_complete_runs(payload, expected_run_labels, path)
 
@@ -309,6 +335,8 @@ def merge_results(input_paths):
             label = spec["label"]
             baseline_label = spec.get("baseline_label") or _default_baseline_label(spec)
             if label not in merged["runs"] or baseline_label not in merged["runs"]:
+                if skip_missing_baseline_comparisons:
+                    continue
                 raise ValueError(
                     f"Missing merged runs for comparison: {label} vs {baseline_label}"
                 )
@@ -335,5 +363,8 @@ def save_result(result, output_path):
 
 if __name__ == "__main__":
     args = parse_args()
-    merged = merge_results(args.inputs)
+    merged = merge_results(
+        args.inputs,
+        skip_missing_baseline_comparisons=args.skip_missing_baseline_comparisons,
+    )
     save_result(merged, args.output)

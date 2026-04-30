@@ -156,6 +156,9 @@ fi
 if [ -n "$SELECTIVE_ROUTE_PROBE_INTERVAL" ]; then
   EXTRA_ARGS+=(--selective_route_probe_interval "$SELECTIVE_ROUTE_PROBE_INTERVAL")
 fi
+if [ "${SKIP_MISSING_BASELINE_COMPARISONS:-0}" = "1" ] || [ "${SKIP_MISSING_BASELINE_COMPARISONS:-0}" = "true" ] || [ "${SKIP_MISSING_BASELINE_COMPARISONS:-0}" = "TRUE" ]; then
+  EXTRA_ARGS+=(--skip_missing_baseline_comparisons)
+fi
 
 IFS=',:' read -r -a DATASET_LIST <<< "$DATASETS_RAW"
 
