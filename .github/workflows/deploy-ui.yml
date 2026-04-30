@@ -1,10 +1,11 @@
 name: Deploy UI
 
 on:
-  push:
-    branches:
-      - main
-      - master
+  # Pages is not currently enabled for this repository, and the default
+  # GITHUB_TOKEN cannot create the Pages site. Keep the deploy workflow
+  # manual-only so normal pushes do not fail until Pages is enabled in
+  # repository settings.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,8 +28,6 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Upload static UI
         uses: actions/upload-pages-artifact@v3
